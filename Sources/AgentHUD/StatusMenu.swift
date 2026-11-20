@@ -31,9 +31,14 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
             .store(in: &cancellables)
     }
 
+    private var shownWaiting = -1
+
     private func updateButton() {
         guard let b = item.button else { return }
         let waiting = model.visibleSessions.filter { $0.state.needsUser }.count
+        // Перерисовываем значок в строке меню, только когда меняется число ждущих, а не на каждом событии.
+        guard waiting != shownWaiting else { return }
+        shownWaiting = waiting
         let img = NSImage(systemSymbolName: waiting > 0 ? "circle.hexagongrid.fill" : "circle.hexagongrid",
                           accessibilityDescription: "AgentHUD")
         img?.isTemplate = true
@@ -74,9 +79,13 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
     /// Статусы конфигов и автозапуска читаются при каждом открытии (и после действий).
     private func panel() -> ControlPanelView {
         var installed: [AgentKind: Bool] = [:]
-        for k in AgentKind.allCases { installed[k] = HookSetup.isInstalled(k) }
+        var present: [AgentKind: Bool] = [:]
+        for k in AgentKind.allCases {
+            installed[k] = HookSetup.isInstalled(k)
+            present[k] = HookSetup.agentPresent(k)
+        }
         return ControlPanelView(model: model, settings: model.settings, actions: actions(),
-                                installed: installed, loginItem: LoginItem.isEnabled)
+                                installed: installed, present: present, loginItem: LoginItem.isEnabled)
     }
 
     private func refresh() {
@@ -138,6 +147,15 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
                 try? Data().write(to: url)
             }
             NSWorkspace.shared.open(url)
+        }
+        a.openMap = { [weak self] in
+            self?.closePopover()
+            self?.model.openMap()
+        }
+        a.openSummary = { [weak self] in
+            guard let self else { return }
+            self.closePopover()
+            NSWorkspace.shared.open(self.model.writeSummary())
         }
         a.quit = { NSApp.terminate(nil) }
         return a

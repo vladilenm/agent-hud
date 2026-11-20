@@ -71,6 +71,9 @@ public struct HookReply: Equatable, Sendable {
         o["request_id"] = .string(requestId)
         switch decision {
         case .allow: o["decision"] = "allow"
+        case .allowWith(let updates):
+            o["decision"] = "allow"
+            o["permissions"] = .array(updates)
         case .deny(let reason):
             o["decision"] = "deny"
             if let r = reason { o["reason"] = .string(r) }
@@ -89,7 +92,11 @@ public struct HookReply: Equatable, Sendable {
               let rid = v["request_id"]?.stringValue,
               let d = v["decision"]?.stringValue else { return nil }
         switch d {
-        case "allow": return HookReply(requestId: rid, decision: .allow)
+        case "allow":
+            if let updates = v["permissions"]?.arrayValue, !updates.isEmpty {
+                return HookReply(requestId: rid, decision: .allowWith(updates))
+            }
+            return HookReply(requestId: rid, decision: .allow)
         case "deny": return HookReply(requestId: rid, decision: .deny(reason: v["reason"]?.stringValue))
         case "answer":
             var answers: [String: String] = [:]

@@ -2,10 +2,11 @@ import AgentHUDCore
 import AppKit
 @preconcurrency import UserNotifications
 
-// AgentHUD — HUD для ИИ-агентов в терминале.
+// AgentHUD — HUD для ИИ-агентов: VS Code, терминал, приложения Claude и Codex.
 //
 //   AgentHUD                      обычный запуск (строка меню + плавающая панель)
 //   AgentHUD --demo               с демонстрационными сессиями (без настоящих агентов)
+//   AgentHUD --summary [ГГГГ-ММ-ДД]  сводка агентов за день в Markdown (по умолчанию — сегодня)
 //   AgentHUD --render-previews D  нарисовать персонажей и окошки в PNG в папку D и выйти
 
 @MainActor
@@ -14,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     lazy var model = AppModel(settings: settings)
     var hud: HUDController!
     var menu: StatusMenu!
+    var map: AgentMapController!
     let demo = CommandLine.arguments.contains("--demo")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -32,9 +34,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         hud = HUDController(model: model)
         menu = StatusMenu(model: model, hud: hud)
+        map = AgentMapController(model: model)
         model.onRequestNeedsAttention = { [weak self] s in self?.notifyIfHidden(s) }
+        model.onOpenMap = { [weak self] in self?.map.show() }
         if demo { Demo.populate(model) }
         hud.updateVisibility()
+        if CommandLine.arguments.contains("--map") { map.show() }
 
         // Первый запуск: предложить подключиться (не в демо и не в тестовом режиме со своим сокетом).
         let testMode = ProcessInfo.processInfo.environment["AGENTHUD_SOCKET"] != nil
@@ -68,8 +73,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 if let i = CommandLine.arguments.firstIndex(where: { $0 == "--connect" || $0 == "--disconnect" || $0 == "--status" }) {
     let args = CommandLine.arguments
     let verb = args[i]
-    let target = i + 1 < args.count ? args[i + 1] : "all"
-    let kinds = target == "all" ? AgentKind.allCases : AgentKind(rawValue: target).map { [$0] } ?? []
+    let target = i + 1 < args.count && !args[i + 1].hasPrefix("--") ? args[i + 1] : "all"
+    // «all» — только агенты, которые есть на машине: не создаём ~/.codex без Codex.
+    let kinds: [AgentKind] = MainActor.assumeIsolated {
+        guard target == "all" else { return AgentKind(rawValue: target).map { [$0] } ?? [] }
+        return AgentKind.allCases.filter { verb == "--connect" ? HookSetup.agentPresent($0) : true }
+    }
     var timeout = HookTiming.defaultTimeout
     if let t = args.firstIndex(of: "--timeout"), t + 1 < args.count, let v = Int(args[t + 1]) { timeout = v }
     let code: Int32 = MainActor.assumeIsolated {
@@ -97,6 +106,22 @@ if let i = CommandLine.arguments.firstIndex(where: { $0 == "--connect" || $0 == 
         return failed ? 1 : 0
     }
     exit(code)
+}
+
+// Сводка за день: AgentHUD --summary [ГГГГ-ММ-ДД] — Markdown в stdout (для стендапа).
+if let i = CommandLine.arguments.firstIndex(of: "--summary") {
+    var day = Date()
+    if i + 1 < CommandLine.arguments.count {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        guard let d = f.date(from: CommandLine.arguments[i + 1]) else {
+            print("Дата в формате ГГГГ-ММ-ДД, например 2026-11-20")
+            exit(2)
+        }
+        day = d
+    }
+    print(DailySummary.markdown(DailySummary.build(ActivityLog.read(day: day)), day: day), terminator: "")
+    exit(0)
 }
 
 // Автозапуск: AgentHUD --login-item on|off|status

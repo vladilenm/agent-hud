@@ -16,7 +16,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 cp "$BIN/AgentHUD" "$APP/Contents/MacOS/AgentHUD"
 cp "$BIN/agenthud-hook" "$APP/Contents/Helpers/agenthud-hook"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
-# Шрифты дизайн-системы (OFL): Golos Text, IBM Plex Mono, Spectral
+# Шрифты (OFL): Golos Text, IBM Plex Mono
 cp -R Resources/Fonts "$APP/Contents/Resources/Fonts"
 # Ресурсы SwiftPM (если появятся)
 for b in "$BIN"/*.bundle; do [ -e "$b" ] && case "$b" in *Tests*) ;; *) cp -R "$b" "$APP/Contents/Resources/";; esac; done

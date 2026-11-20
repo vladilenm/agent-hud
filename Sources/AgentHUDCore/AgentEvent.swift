@@ -7,7 +7,8 @@ public struct AgentEvent: Equatable, Sendable {
         case promptSubmitted(String)
         case toolStarted(toolName: String, input: JSONValue, toolUseId: String?)
         case toolFinished(toolName: String, input: JSONValue, toolUseId: String?, durationMs: Int?, failed: Bool)
-        case permissionRequested(requestId: String, toolName: String, input: JSONValue, deadline: Date)
+        /// `suggestions` — правила «разрешать и дальше», которые предлагает сам агент (`permission_suggestions`).
+        case permissionRequested(requestId: String, toolName: String, input: JSONValue, deadline: Date, suggestions: [JSONValue])
         case questionAsked(requestId: String, questions: [Question], rawInput: JSONValue, deadline: Date)
         case subagentStarted(agentId: String, agentType: String?)
         case subagentStopped(agentId: String)

@@ -74,13 +74,15 @@ struct LogoAvatar: View {
 }
 
 /// Несколько иконок агентов внахлёст — для превью стиля и шапки панели.
+/// Только агенты, чьи приложения установлены (без Codex — одна иконка Claude).
 struct AgentIconStack: View {
     var size: CGFloat = 30
     var state: AgentState = .working
 
     var body: some View {
+        let kinds = AgentKind.allCases.filter { AgentIcons.icon(for: $0) != nil }
         HStack(spacing: -size * 0.35) {
-            ForEach(AgentKind.allCases, id: \.self) { k in
+            ForEach(kinds.isEmpty ? [AgentKind.claude] : kinds, id: \.self) { k in
                 LogoAvatar(kind: k, state: state, size: size)
             }
         }

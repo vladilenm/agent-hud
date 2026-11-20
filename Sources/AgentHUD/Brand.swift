@@ -2,8 +2,8 @@ import AppKit
 import CoreText
 import SwiftUI
 
-/// Токены дизайн-системы Владилена Минина (vladilen-design-system/DESIGN.md, v1.0.0).
-/// Цвета — парами для светлой и тёмной темы, шрифты — Golos Text, IBM Plex Mono, Spectral (OFL, лежат в Resources/Fonts).
+/// Токены интерфейса. Палитра — по цветам Yora (основной синий #016FEE / #338EF7, нейтральные «zinc»),
+/// цвета — парами для светлой и тёмной темы. Шрифты — Golos Text и IBM Plex Mono (OFL, лежат в Resources/Fonts).
 enum Brand {
     // MARK: Цвета
 
@@ -15,25 +15,25 @@ enum Brand {
         })
     }
 
-    static let bg = dyn(0xF7F6FA, 0x0E0B14)
-    static let surface = dyn(0xFFFFFF, 0x17131F)
-    static let surfaceSunken = dyn(0xEFEDF4, 0x120F19)
-    static let line = dyn(0xE2DFEA, 0x2B2537)
-    static let lineStrong = dyn(0x8F889D, 0x6A617E)
-    static let ink = dyn(0x16121E, 0xF5F3FA)
-    static let inkMuted = dyn(0x565062, 0xB6AFC4)
-    static let inkSubtle = dyn(0x6B6578, 0x8F889D)
-    static let accent = dyn(0x7C3AED, 0xA78BFA)
-    static let accentHover = dyn(0x6A2BD8, 0xBBA4FC)
-    static let onAccent = dyn(0xFFFFFF, 0x160E2B)
-    static let accentSoft = dyn(0xEDE6FF, 0x261C3D)
-    static let accentText = dyn(0x6A2BD8, 0xB79CFF)
-    static let success = dyn(0x1E7A4C, 0x5CC98F)
-    static let successSoft = dyn(0xE3F3EA, 0x13291E)
-    static let warning = dyn(0x8F5B00, 0xE5AE45)
-    static let warningSoft = dyn(0xFBEFD9, 0x2D2312)
-    static let danger = dyn(0xB3261E, 0xF27D78)
-    static let dangerSoft = dyn(0xFBE6E4, 0x33171A)
+    static let bg = dyn(0xF4F4F5, 0x18181B)
+    static let surface = dyn(0xFFFFFF, 0x1E1E23)
+    static let surfaceSunken = dyn(0xECECEF, 0x141417)
+    static let line = dyn(0xE4E4E7, 0x34343A)
+    static let lineStrong = dyn(0xA1A1AA, 0x71717A)
+    static let ink = dyn(0x10181C, 0xECEDEE)
+    static let inkMuted = dyn(0x52525B, 0xC4C4CC)
+    static let inkSubtle = dyn(0x71717A, 0xA1A1AA)
+    static let accent = dyn(0x016FEE, 0x338EF7)
+    static let accentHover = dyn(0x005BC4, 0x66AAF9)
+    static let onAccent = dyn(0xFFFFFF, 0xFFFFFF)
+    static let accentSoft = dyn(0xE6F1FE, 0x0D2847)
+    static let accentText = dyn(0x005BC4, 0x66AAF9)
+    static let success = dyn(0x13703C, 0x41C97C)
+    static let successSoft = dyn(0xE3F8EC, 0x12281C)
+    static let warning = dyn(0x8F5A00, 0xF5A524)
+    static let warningSoft = dyn(0xFEF3DC, 0x2E2410)
+    static let danger = dyn(0xC20E4D, 0xF54180)
+    static let dangerSoft = dyn(0xFEE7EF, 0x33111D)
 
     // MARK: Шрифты
 
@@ -54,10 +54,9 @@ enum Brand {
                              : .system(size: size, weight: medium ? .medium : .regular, design: .monospaced)
     }
 
-    /// Spectral — заголовки, тонкие начертания.
-    static func display(_ size: CGFloat, light: Bool = true) -> Font {
-        FontLoader.available ? .custom(light ? "Spectral-Light" : "Spectral-Regular", size: size)
-                             : .system(size: size, weight: .light, design: .serif)
+    /// Заголовки — Golos Text SemiBold.
+    static func display(_ size: CGFloat) -> Font {
+        FontLoader.available ? .custom("GolosText-Regular_SemiBold", size: size) : .system(size: size, weight: .semibold)
     }
 
     // MARK: Размеры (сетка 4px)

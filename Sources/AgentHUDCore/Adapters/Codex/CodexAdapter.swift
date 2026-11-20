@@ -36,7 +36,8 @@ public struct CodexAdapter: AgentAdapter {
         }
 
         if message.mode == .permission {
-            var out = [make(.permissionRequested(requestId: message.requestId, toolName: toolName, input: input, deadline: deadline))]
+            var out = [make(.permissionRequested(requestId: message.requestId, toolName: toolName, input: input,
+                                                 deadline: deadline, suggestions: []))]
             // В режиме auto_review запрос решает встроенный ревьюер Codex, не дожидаясь хука.
             if Self.approvalsReviewer(sessionId: sid, transcriptPath: p["transcript_path"]?.stringValue) == "auto_review" {
                 out.append(make(.autoReviewing(requestId: message.requestId)))
@@ -77,7 +78,8 @@ public struct CodexAdapter: AgentAdapter {
     public func hookOutput(for decision: Decision, mode: HookMode, payload: JSONValue) -> String? {
         guard mode == .permission else { return nil }
         switch decision {
-        case .allow:
+        case .allow, .allowWith:
+            // Правил «разрешать всегда» в ответе хука Codex нет — только разовое allow.
             return ClaudeCodeAdapter.permissionOutput(["behavior": "allow"])
         case .deny(let reason):
             let msg = (reason?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }

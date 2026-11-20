@@ -29,6 +29,13 @@ public enum AgentState: String, Sendable {
     public var needsUser: Bool { self == .waitingPermission || self == .waitingAnswer }
 }
 
+/// Где идёт сессия — от этого зависят подписи и кнопка «Открыть».
+public enum HostPlace: String, Sendable {
+    case terminal     // терминал (в том числе встроенный терминал VS Code)
+    case desktopApp   // приложение Claude или Codex
+    case editor       // расширение Claude Code в VS Code
+}
+
 /// Где запущен агент: нужно для кнопки «Открыть».
 public struct HostInfo: Equatable, Sendable {
     public var termProgram: String?
@@ -40,14 +47,20 @@ public struct HostInfo: Equatable, Sendable {
     public var appBundleId: String?    // GUI-приложение, внутри которого идёт сессия
     public var appName: String?
     public var hostSessionId: String?  // id сессии в приложении (Claude: local_…)
+    public var entrypoint: String?     // CLAUDE_CODE_ENTRYPOINT: cli, claude-desktop, claude-vscode…
 
     public static let claudeDesktop = "com.anthropic.claudefordesktop"
     public static let codexDesktop = "com.openai.codex"
     public static let desktopApps: Set<String> = [claudeDesktop, codexDesktop]
+    public static let vscode = "com.microsoft.VSCode"
+    public static let vscodeInsiders = "com.microsoft.VSCodeInsiders"
+    public static let editorApps: Set<String> = [vscode, vscodeInsiders]
+    public static let vscodeEntrypoint = "claude-vscode"
 
     public init(termProgram: String? = nil, tty: String? = nil, agentPid: Int32? = nil,
                 herdrPaneId: String? = nil, herdrSocket: String? = nil, processChain: [String] = [],
-                appBundleId: String? = nil, appName: String? = nil, hostSessionId: String? = nil) {
+                appBundleId: String? = nil, appName: String? = nil, hostSessionId: String? = nil,
+                entrypoint: String? = nil) {
         self.termProgram = termProgram
         self.tty = tty
         self.agentPid = agentPid
@@ -57,15 +70,32 @@ public struct HostInfo: Equatable, Sendable {
         self.appBundleId = appBundleId
         self.appName = appName
         self.hostSessionId = hostSessionId
+        self.entrypoint = entrypoint
     }
 
-    public var isEmpty: Bool { tty == nil && agentPid == nil && herdrPaneId == nil && termProgram == nil && appBundleId == nil }
+    public var isEmpty: Bool { tty == nil && agentPid == nil && herdrPaneId == nil && termProgram == nil && appBundleId == nil && entrypoint == nil }
 
     /// Сессия идёт в десктопном приложении (Claude, Codex), а не в терминале.
     public var isDesktopApp: Bool { tty == nil && appBundleId.map(Self.desktopApps.contains) == true }
 
-    /// Человекочитаемое имя хоста: «Terminal», «herdr», «приложение Claude».
+    /// Сессия идёт в расширении Claude Code для VS Code (панель чата, не терминал).
+    public var isEditor: Bool {
+        entrypoint == Self.vscodeEntrypoint || (tty == nil && appBundleId.map(Self.editorApps.contains) == true)
+    }
+
+    /// Терминал внутри VS Code: `claude` запущен во встроенном терминале редактора.
+    public var isEditorTerminal: Bool { !isEditor && termProgram == "vscode" }
+
+    public var place: HostPlace {
+        if isEditor { return .editor }
+        if isDesktopApp { return .desktopApp }
+        return .terminal
+    }
+
+    /// Человекочитаемое имя хоста: «Terminal», «herdr», «приложение Claude», «VS Code».
     public var label: String {
+        if isEditor { return appBundleId == Self.vscodeInsiders ? "VS Code Insiders" : "VS Code" }
+        if isEditorTerminal { return "терминал VS Code" }
         if isDesktopApp {
             switch appBundleId {
             case Self.claudeDesktop: return "приложение Claude"
@@ -93,6 +123,7 @@ public struct HostInfo: Equatable, Sendable {
         if let v = appBundleId { o["app_bundle_id"] = .string(v) }
         if let v = appName { o["app_name"] = .string(v) }
         if let v = hostSessionId { o["host_session_id"] = .string(v) }
+        if let v = entrypoint { o["entrypoint"] = .string(v) }
         return .object(o)
     }
 
@@ -106,7 +137,8 @@ public struct HostInfo: Equatable, Sendable {
             processChain: json?["process_chain"]?.arrayValue?.compactMap(\.stringValue) ?? [],
             appBundleId: json?["app_bundle_id"]?.stringValue,
             appName: json?["app_name"]?.stringValue,
-            hostSessionId: json?["host_session_id"]?.stringValue
+            hostSessionId: json?["host_session_id"]?.stringValue,
+            entrypoint: json?["entrypoint"]?.stringValue
         )
     }
 }
@@ -154,8 +186,11 @@ public struct Question: Equatable, Sendable {
 public enum PendingKind: Equatable, Sendable {
     case permission(toolName: String, toolInput: JSONValue)
     case question([Question], rawInput: JSONValue)
+    /// Агент закончил планирование и просит одобрить план (ExitPlanMode).
+    case plan(text: String, rawInput: JSONValue)
 
     public var isQuestion: Bool { if case .question = self { return true } else { return false } }
+    public var isPlan: Bool { if case .plan = self { return true } else { return false } }
 }
 
 public enum PendingStatus: String, Sendable {
@@ -174,11 +209,18 @@ public struct PendingRequest: Identifiable, Equatable, Sendable {
     var inputFingerprint: String
     /// Запрос параллельно проверяет встроенный ревьюер агента (Codex auto_review) — ответ в HUD необязателен.
     public var autoReview = false
+    /// Подсказки агента «разрешать и дальше» (`permission_suggestions` у Claude Code) — как есть.
+    public var suggestions: [JSONValue] = []
+    /// Запрос пришёл изнутри субагента (`agent_id`); nil — основной агент.
+    public var agentId: String? = nil
 }
 
 /// Ответ пользователя, общий для всех агентов. Адаптер переводит его в формат своего агента.
 public enum Decision: Equatable, Sendable {
     case allow
+    /// Разрешить и применить правила/режим (`updatedPermissions` у Claude Code):
+    /// «разрешать всегда», «одобрить план и принимать правки сразу».
+    case allowWith([JSONValue])
     case deny(reason: String?)
     case answer([String: String])  // текст вопроса → выбранные метки через ", " или свой текст
     case passthrough               // «ответить в терминале» / нет ответа
@@ -186,9 +228,18 @@ public enum Decision: Equatable, Sendable {
     public var logLabel: String {
         switch self {
         case .allow: return "разрешено"
+        case .allowWith(let updates):
+            return updates.contains { $0["type"]?.stringValue == "addRules" } ? "разрешено всегда" : "разрешено + режим"
         case .deny: return "отклонено"
         case .answer: return "ответ"
-        case .passthrough: return "в терминал"
+        case .passthrough: return "в агента"
+        }
+    }
+
+    public var isAllow: Bool {
+        switch self {
+        case .allow, .allowWith: return true
+        default: return false
         }
     }
 }
@@ -215,6 +266,8 @@ public struct AgentSession: Identifiable, Equatable, Sendable {
     public var revealed = true
     /// Агент спросил пользователя в самом приложении (Codex `request_user_input`) — текст вопроса.
     public var waitingNote: String?
+    /// Когда начался текущий (или последний) ход — для сводки и карты агентов.
+    public var turnStartedAt: Date?
     var askedUserThisTurn = false
 
     public static let maxSteps = 200
@@ -235,10 +288,8 @@ public struct AgentSession: Identifiable, Equatable, Sendable {
         self.hidden = false
     }
 
-    public var projectName: String {
-        let name = (cwd as NSString).lastPathComponent
-        return name.isEmpty ? cwd : name
-    }
+    /// Имя проекта: папка сессии, а для безликих имён («front», «app») — вместе с родительской.
+    public var projectName: String { ProjectNames.displayName(cwd: cwd) }
 
     /// Первый открытый запрос — его и показываем. Запросы, которые ждут пользователя, — раньше авто-проверяемых.
     public var activePending: PendingRequest? {
@@ -254,8 +305,48 @@ public struct AgentSession: Identifiable, Equatable, Sendable {
 
     public var currentStep: Step? { steps.last(where: { $0.status == .running }) }
 
+    /// Шаги текущего хода (после последнего промпта).
+    public var turnSteps: [Step] {
+        guard let t = turnStartedAt else { return steps }
+        return steps.filter { $0.startedAt >= t }
+    }
+
+    /// Итог хода для сводки: сколько раз какой инструмент, какие файлы правились, сколько длился.
+    public func turnStats(until end: Date? = nil) -> TurnStats {
+        var tools: [String: Int] = [:]
+        var files: [String] = []
+        for st in turnSteps where !st.isSubagent {
+            tools[st.toolName, default: 0] += 1
+            if ["Edit", "MultiEdit", "Write", "NotebookEdit"].contains(st.toolName),
+               let space = st.summary.firstIndex(of: " ") {
+                let f = String(st.summary[st.summary.index(after: space)...])
+                if !f.isEmpty, !files.contains(f) { files.append(f) }
+            }
+        }
+        let subagents = turnSteps.filter(\.isSubagent).count
+        let duration = turnStartedAt.map { Int(max(0, (end ?? finishedAt ?? lastEventAt).timeIntervalSince($0))) }
+        return TurnStats(tools: tools, files: files, subagents: subagents, durationSec: duration)
+    }
+
     /// Стабильное «зерно» внешнего вида персонажа.
     public var avatarSeed: UInt64 { stableHash(id) }
+}
+
+public struct TurnStats: Equatable, Sendable {
+    public var tools: [String: Int]
+    public var files: [String]
+    public var subagents: Int
+    public var durationSec: Int?
+
+    public init(tools: [String: Int] = [:], files: [String] = [], subagents: Int = 0, durationSec: Int? = nil) {
+        self.tools = tools
+        self.files = files
+        self.subagents = subagents
+        self.durationSec = durationSec
+    }
+
+    public var edits: Int { ["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch"].reduce(0) { $0 + (tools[$1] ?? 0) } }
+    public var commands: Int { ["Bash", "shell", "exec_command", "local_shell", "unified_exec"].reduce(0) { $0 + (tools[$1] ?? 0) } }
 }
 
 /// FNV-1a: стабильный между запусками хэш (у `Hasher` случайная соль).

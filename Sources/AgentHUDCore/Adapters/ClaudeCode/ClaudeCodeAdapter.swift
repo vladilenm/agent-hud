@@ -8,7 +8,9 @@ public struct ClaudeCodeAdapter: AgentAdapter {
     public var kind: AgentKind { .claude }
 
     /// Инструменты, на которые хук разрешений не отвечает (их обрабатывает свой поток или терминал).
-    static let permissionPassthroughTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
+    /// ExitPlanMode отвечаем: это одобрение плана (окошко плана в HUD).
+    static let permissionPassthroughTools: Set<String> = ["AskUserQuestion"]
+    static let planTool = "ExitPlanMode"
 
     public func shouldForward(mode: HookMode, payload: JSONValue) -> Bool {
         let tool = payload["tool_name"]?.stringValue ?? ""
@@ -37,7 +39,8 @@ public struct ClaudeCodeAdapter: AgentAdapter {
 
         switch message.mode {
         case .permission:
-            return [make(.permissionRequested(requestId: message.requestId, toolName: toolName, input: input, deadline: deadline))]
+            return [make(.permissionRequested(requestId: message.requestId, toolName: toolName, input: input, deadline: deadline,
+                                              suggestions: p["permission_suggestions"]?.arrayValue ?? []))]
         case .question:
             let qs = Self.parseQuestions(input)
             return [make(.questionAsked(requestId: message.requestId, questions: qs, rawInput: input, deadline: deadline))]
@@ -86,10 +89,19 @@ public struct ClaudeCodeAdapter: AgentAdapter {
         case (_, .passthrough), (.event, _):
             return nil
         case (.permission, .allow):
-            return Self.permissionOutput(["behavior": "allow"])
+            return Self.permissionOutput(Self.allowDecision(payload: payload, updates: []))
+        case (.permission, .allowWith(let updates)):
+            return Self.permissionOutput(Self.allowDecision(payload: payload, updates: updates))
         case (.permission, .deny(let reason)):
-            let msg = (reason?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-                ?? "Пользователь отклонил это действие в AgentHUD."
+            let isPlan = payload["tool_name"]?.stringValue == Self.planTool
+            let given = (reason?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+            let msg: String
+            switch (isPlan, given) {
+            case (true, let r?): msg = "Пользователь не одобрил план. Замечания: \(r)"
+            case (true, nil): msg = "Пользователь не одобрил план в AgentHUD. Продолжай планировать и спроси, что изменить."
+            case (false, let r?): msg = r
+            case (false, nil): msg = "Пользователь отклонил это действие в AgentHUD."
+            }
             return Self.permissionOutput(["behavior": "deny", "message": .string(msg)])
         case (.permission, .answer):
             return nil
@@ -115,9 +127,21 @@ public struct ClaudeCodeAdapter: AgentAdapter {
                 "permissionDecisionReason": .string(msg),
             ]]
             return out.compact()
-        case (.question, .allow):
+        case (.question, .allow), (.question, .allowWith):
             return nil   // просто allow без answers не работает — пусть спросит терминал
         }
+    }
+
+    /// `allow` для PermissionRequest. Документация: для ExitPlanMode нужен `updatedInput` (возвращаем вход как есть),
+    /// `updatedPermissions` — правила и режим (можно вернуть одну из `permission_suggestions` без изменений).
+    static func allowDecision(payload: JSONValue, updates: [JSONValue]) -> JSONValue {
+        var d = JSONObject()
+        d["behavior"] = "allow"
+        if payload["tool_name"]?.stringValue == planTool, let input = payload["tool_input"], input.objectValue != nil {
+            d["updatedInput"] = input
+        }
+        if !updates.isEmpty { d["updatedPermissions"] = .array(updates) }
+        return .object(d)
     }
 
     static func permissionOutput(_ decision: JSONValue) -> String {

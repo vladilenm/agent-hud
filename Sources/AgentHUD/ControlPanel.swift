@@ -11,18 +11,23 @@ struct PanelActions {
     var setLoginItem: (Bool) -> Void = { _ in }
     var resetPosition: () -> Void = {}
     var openLog: () -> Void = {}
+    var openMap: () -> Void = {}
+    var openSummary: () -> Void = {}
     var quit: () -> Void = {}
 }
 
-/// Панель в строке меню: сессии, агенты, вид, поведение. Стиль — дизайн-система Владилена.
+/// Панель в строке меню: сессии, агенты, вид, поведение. Палитра — Yora (Brand.swift).
 struct ControlPanelView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var settings: Settings
     var actions = PanelActions()
     /// Статусы, которые не публикуются сами (файлы конфигов, автозапуск) — читаются при открытии.
     var installed: [AgentKind: Bool] = [:]
+    /// Какие агенты есть на машине: остальных (например, Codex без Codex) в панели не показываем.
+    var present: [AgentKind: Bool] = [:]
     var loginItem = false
     @State var tab = 0
+    @State private var quickText = ""
 
     static let width: CGFloat = 340
 
@@ -32,6 +37,10 @@ struct ControlPanelView: View {
             BrandTabs(titles: ["Сессии", "Настройки"], selection: $tab,
                       badges: [0: model.visibleSessions.filter { $0.state.needsUser }.count])
             if tab == 0 {
+                HStack(spacing: 8) {
+                    PanelButton(title: "Карта агентов", symbol: "map", action: actions.openMap)
+                    PanelButton(title: "Сводка за день", symbol: "list.bullet.rectangle", action: actions.openSummary)
+                }
                 sessionsSection
                 agentsSection
             } else {
@@ -91,7 +100,7 @@ struct ControlPanelView: View {
             SectionLabel(index: 1, title: "Сессии")
             Card {
                 if sessions.isEmpty {
-                    Text("Пока тихо. Запусти агента в терминале или в приложении — он появится здесь.")
+                    Text("Пока тихо. Запусти агента в VS Code, терминале или приложении — он появится здесь.")
                         .font(Brand.body(12)).foregroundStyle(Brand.inkMuted)
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.vertical, 12)
@@ -116,10 +125,12 @@ struct ControlPanelView: View {
     // MARK: 02 Агенты
 
     private var agentsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        // Агент без своей папки настроек на машине не установлен — не предлагаем подключать.
+        let kinds = AgentKind.allCases.filter { present[$0] ?? true || installed[$0] ?? false }
+        return VStack(alignment: .leading, spacing: 8) {
             SectionLabel(index: 2, title: "Агенты")
             Card {
-                ForEach(Array(AgentKind.allCases.enumerated()), id: \.element) { i, kind in
+                ForEach(Array(kinds.enumerated()), id: \.element) { i, kind in
                     if i > 0 { Rectangle().fill(Brand.line).frame(height: 1) }
                     AgentRow(kind: kind, installed: installed[kind] ?? false,
                              toggle: { on in on ? actions.connect(kind) : actions.disconnect(kind) })
@@ -144,6 +155,8 @@ struct ControlPanelView: View {
                     Divider().overlay(Brand.line)
                     BrandToggleRow(title: "Показывать HUD", isOn: $settings.hudVisible)
                     BrandToggleRow(title: "Анимация персонажей", isOn: $settings.animations)
+                    BrandToggleRow(title: "Проект под иконкой", hint: "Короткое имя проекта, чтобы различать сессии",
+                                   isOn: $settings.projectLabels)
                     BrandToggleRow(title: "Прятать, когда никто не ждёт",
                                    hint: "HUD появится только при запросе или вопросе", isOn: $settings.hideWhenNothingWaits)
                         .padding(.bottom, 4)
@@ -164,6 +177,8 @@ struct ControlPanelView: View {
                     BrandToggleRow(title: "Уведомления, если HUD скрыт", isOn: $settings.notifications)
                     BrandToggleRow(title: "Запускать при входе в систему",
                                    isOn: Binding(get: { loginItem }, set: { actions.setLoginItem($0) }))
+                    BrandToggleRow(title: "Журнал активности", hint: "Для сводки за день; хранится только на этом Mac",
+                                   isOn: $settings.activityLog)
                     Divider().overlay(Brand.line).padding(.vertical, 4)
                     FieldLabel(title: "Время на ответ", hint: "потом — в агента")
                     BrandSegmented(options: [(120, "2 МИН"), (300, "5 МИН"), (600, "10 МИН"), (1800, "30 МИН")],
@@ -171,10 +186,22 @@ struct ControlPanelView: View {
                     FieldLabel(title: "Прятать готовые сессии").padding(.top, 8)
                     BrandSegmented(options: [(0, "НЕТ"), (5, "5 МИН"), (30, "30 МИН"), (120, "2 Ч")],
                                    selection: $settings.autoHideDoneMinutes)
+                    FieldLabel(title: "Быстрые промпты", hint: "для VS Code, через ;").padding(.top, 8)
+                    TextField("Продолжай; Прогони тесты", text: $quickText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(Brand.body(12))
+                        .onAppear { quickText = settings.quickPrompts.joined(separator: "; ") }
+                        .onSubmit(commitQuickPrompts)
+                        .onDisappear(perform: commitQuickPrompts)
                         .padding(.bottom, 12)
                 }
             }
         }
+    }
+
+    private func commitQuickPrompts() {
+        let list = quickText.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if list != settings.quickPrompts { settings.quickPrompts = list }
     }
 
     // MARK: Подвал
@@ -229,7 +256,10 @@ struct SessionRow: View {
         HStack(spacing: 10) {
             AvatarView(seed: session.avatarSeed, state: session.state, style: style, size: 28, animated: false, kind: session.kind)
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.projectName).font(Brand.body(13, .medium)).foregroundStyle(Brand.ink).lineLimit(1)
+                HStack(spacing: 5) {
+                    ProjectDot(cwd: session.cwd, size: 7)
+                    Text(session.projectName).font(Brand.body(13, .medium)).foregroundStyle(Brand.ink).lineLimit(1)
+                }
                 Text(detail).font(Brand.mono(10)).foregroundStyle(Brand.inkSubtle).lineLimit(1).truncationMode(.tail)
             }
             Spacer(minLength: 6)
@@ -240,7 +270,7 @@ struct SessionRow: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Brand.inkMuted)
-                .help(session.host.isDesktopApp ? "Открыть в приложении" : "Открыть в терминале")
+                .help(session.host.openTitle)
             }
             BrandTag(text: session.state.shortTitle, tone: session.state.tone)
         }
@@ -254,8 +284,7 @@ struct SessionRow: View {
     }
 
     private var detail: String {
-        let host = session.host.isDesktopApp ? "приложение" : session.host.label
-        var parts = ["\(session.kind.displayName) · \(host)"]
+        var parts = ["\(session.kind.displayName) · \(session.host.label)"]
         if !session.title.isEmpty { parts.append(session.title) }
         return parts.joined(separator: " — ")
     }
@@ -282,9 +311,34 @@ struct AgentRow: View {
     private var hint: String {
         guard installed else { return "Не подключён" }
         switch kind {
-        case .claude: return "Терминал и приложение Claude"
+        case .claude: return "VS Code, терминал и приложение Claude"
         case .codex: return "Терминал и приложение · хуки: /hooks"
         }
+    }
+}
+
+/// Кнопка-плитка панели: «Карта агентов», «Сводка за день».
+struct PanelButton: View {
+    let title: String
+    let symbol: String
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: symbol).font(.system(size: 12))
+                Text(title).font(Brand.body(12, .medium)).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 30)
+            .foregroundStyle(Brand.accentText)
+            .background(RoundedRectangle(cornerRadius: Brand.radiusMd).fill(hover ? Brand.accentSoft : Brand.surface))
+            .overlay(RoundedRectangle(cornerRadius: Brand.radiusMd).strokeBorder(Brand.line, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
     }
 }
 

@@ -34,29 +34,32 @@ struct PermissionView: View {
             }
             ToolDetail(tool: tool, input: input, cwd: session.cwd)
             if denying {
-                HStack(spacing: 6) {
-                    TextField("Почему (необязательно)", text: $reason)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12))
-                        .focused($reasonFocused)
-                        .onSubmit { deny() }
-                    Button("Отклонить", role: .destructive) { deny() }
-                    Button("Отмена") { denying = false }
+                TextField("Почему (необязательно) — агент получит это", text: $reason)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13))
+                    .controlSize(.large)
+                    .focused($reasonFocused)
+                    .onSubmit { deny() }
+                HStack(spacing: 8) {
+                    BigButton(title: "Отклонить", symbol: "xmark", prominent: true, role: .destructive) { deny() }
+                    BigButton(title: "Отмена", symbol: "arrow.uturn.backward") { denying = false }
                 }
-                .controlSize(.small)
             } else {
+                // Главные действия — крупно и на всю ширину.
+                HStack(spacing: 8) {
+                    BigButton(title: "Разрешить", symbol: "checkmark", prominent: true) { model.decide(request.id, .allow) }
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .help("Разрешить один раз (⌘↩)")
+                    BigButton(title: "Отклонить…", symbol: "xmark", role: .destructive) { denying = true; reasonFocused = true }
+                        .help("Отклонить; можно написать агенту почему")
+                }
                 HStack(spacing: 6) {
-                    Button { model.decide(request.id, .allow) } label: {
-                        Label("Разрешить", systemImage: "checkmark").frame(minWidth: 90)
+                    if !ruleOptions.isEmpty {
+                        AlwaysMenu(options: ruleOptions) { o in model.decide(request.id, .allowWith([o.update])) }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .help("Разрешить (⌘↩)")
-                    Button("Отклонить…") { denying = true; reasonFocused = true }
-                    Spacer()
+                    Spacer(minLength: 0)
                     Button { model.decide(request.id, .passthrough) } label: {
-                        Label(session.host.isDesktopApp ? "В приложении" : "В терминале",
-                              systemImage: session.host.isDesktopApp ? "macwindow" : "terminal")
+                        Label(session.host.passthroughTitle, systemImage: session.host.placeSymbol)
                     }
                     .help("Ответить там, где работает агент: окошко закроется, откроется его сессия")
                 }
@@ -72,8 +75,184 @@ struct PermissionView: View {
         return tool
     }
 
+    /// «Разрешить всегда» — только Claude Code (у хуков Codex такого ответа нет).
+    private var ruleOptions: [RuleOption] {
+        guard session.kind == .claude, !request.autoReview else { return [] }
+        return PermissionRules.options(toolName: tool, input: input, suggestions: request.suggestions)
+    }
+
     private func deny() {
         model.decide(request.id, .deny(reason: reason.isEmpty ? nil : reason))
+    }
+}
+
+/// Крупная кнопка действия: на всю доступную ширину, высота 34 pt.
+/// Свой стиль, а не системный: системная «выделенная» кнопка сереет, когда окно неактивно, —
+/// а окошко, открытое самим запросом, как раз неактивно, и «Разрешить» не отличалась от «Отклонить».
+struct BigButton: View {
+    let title: String
+    let symbol: String
+    var prominent = false
+    var role: ButtonRole? = nil
+    let action: () -> Void
+
+    var body: some View {
+        Button(role: role, action: action) {
+            Label(title, systemImage: symbol)
+        }
+        .buttonStyle(BigButtonStyle(prominent: prominent, destructive: role == .destructive))
+    }
+}
+
+struct BigButtonStyle: ButtonStyle {
+    let prominent: Bool
+    let destructive: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        BigButtonBody(configuration: configuration, prominent: prominent, destructive: destructive)
+    }
+}
+
+private struct BigButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    let prominent: Bool
+    let destructive: Bool
+    @Environment(\.isEnabled) private var enabled
+    @State private var hover = false
+
+    var body: some View {
+        let tint: Color = destructive ? Brand.danger : Brand.accent
+        configuration.label
+            .font(.system(size: 13, weight: .semibold))
+            .lineLimit(1)
+            .foregroundStyle(prominent ? Color.white : (destructive ? Brand.danger : Color.primary))
+            .frame(maxWidth: .infinity, minHeight: 34)
+            .background {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(prominent ? tint.opacity(hover ? 0.88 : 1) : Color.primary.opacity(hover ? 0.1 : 0.055))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(prominent ? Color.clear : (destructive ? Brand.danger.opacity(0.5) : Color.primary.opacity(0.14)),
+                                  lineWidth: 1)
+            }
+            .opacity(enabled ? (configuration.isPressed ? 0.75 : 1) : 0.4)
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .onHover { hover = $0 }
+    }
+}
+
+/// Меню «Всегда»: шаблон от HUD (короче список правил) и подсказки самого Claude Code.
+struct AlwaysMenu: View {
+    let options: [RuleOption]
+    let pick: (RuleOption) -> Void
+
+    var body: some View {
+        Menu {
+            let generated = options.filter(\.generated)
+            let suggested = options.filter { !$0.generated }
+            if !generated.isEmpty {
+                Section("Шаблон") {
+                    ForEach(generated) { o in Button("\(o.title) — \(o.scope)") { pick(o) } }
+                }
+            }
+            if !suggested.isEmpty {
+                Section("Как предлагает Claude") {
+                    ForEach(suggested) { o in Button("\(o.title) — \(o.scope)") { pick(o) } }
+                }
+            }
+        } label: {
+            Text("Всегда")
+        }
+        .fixedSize()
+        .help("Разрешить и больше не спрашивать: правило запишется в настройки Claude Code")
+    }
+}
+
+// MARK: - План (ExitPlanMode)
+
+struct PlanView: View {
+    @ObservedObject var model: AppModel
+    let session: AgentSession
+    let request: PendingRequest
+    let text: String
+
+    @State private var revising = false
+    @State private var feedback = ""
+    @State private var expanded = false
+    @FocusState private var feedbackFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "list.bullet.clipboard.fill").foregroundStyle(.orange)
+                Text("План готов — одобрить?").font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Countdown(deadline: request.deadline)
+            }
+            planText
+            if revising {
+                TextField("Что изменить в плане", text: $feedback)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13))
+                    .controlSize(.large)
+                    .focused($feedbackFocused)
+                    .onSubmit { revise() }
+                HStack(spacing: 8) {
+                    BigButton(title: "Отправить", symbol: "paperplane.fill", prominent: true) { revise() }
+                    BigButton(title: "Отмена", symbol: "arrow.uturn.backward") { revising = false }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    BigButton(title: "Одобрить", symbol: "checkmark", prominent: true) {
+                        model.decide(request.id, .allowWith(PermissionRules.planApproval(acceptEdits: false)))
+                    }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .help("Одобрить план; правки файлов агент будет согласовывать (⌘↩)")
+                    BigButton(title: "Доработать…", symbol: "pencil") { revising = true; feedbackFocused = true }
+                        .help("Оставить агента в режиме планирования и передать замечания")
+                }
+                HStack(spacing: 6) {
+                    Button("Одобрить и править сразу") {
+                        model.decide(request.id, .allowWith(PermissionRules.planApproval(acceptEdits: true)))
+                    }
+                    .help("Одобрить план и до конца сессии принимать правки файлов без вопросов")
+                    Spacer()
+                    Button { model.decide(request.id, .passthrough) } label: {
+                        Label(session.host.passthroughTitle, systemImage: session.host.placeSymbol)
+                    }
+                    .help("Ответить там, где работает агент: окошко закроется, откроется его сессия")
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.09)))
+    }
+
+    private var planText: some View {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let limit = expanded ? 400 : 14
+        return VStack(alignment: .leading, spacing: 4) {
+            ScrollView {
+                Text(verbatim: lines.prefix(limit).joined(separator: "\n"))
+                    .font(.system(size: 11))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+            }
+            .frame(maxHeight: expanded ? 320 : 200)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.05)))
+            if lines.count > 14 {
+                Button(expanded ? "Свернуть" : "Показать целиком (\(lines.count) строк)") { expanded.toggle() }
+                    .buttonStyle(.link).font(.system(size: 11))
+            }
+        }
+    }
+
+    private func revise() {
+        model.decide(request.id, .deny(reason: feedback.isEmpty ? nil : feedback))
     }
 }
 
@@ -91,13 +270,23 @@ struct Countdown: View {
     }
 }
 
-/// Что именно агент хочет сделать — в читаемом виде.
+/// Что именно агент хочет сделать — в читаемом виде. Всегда ограничено по высоте и прокручивается:
+/// огромный ввод (длинный скрипт, большой файл) не должен выталкивать кнопки за край экрана.
 struct ToolDetail: View {
     let tool: String
     let input: JSONValue
     let cwd: String
+    static let maxHeight: CGFloat = 200
 
     var body: some View {
+        ScrollView {
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxHeight: Self.maxHeight)
+    }
+
+    @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 4) {
             switch tool {
             case "Bash":
@@ -122,8 +311,33 @@ struct ToolDetail: View {
                 Code(text: input["url"]?.stringValue ?? "", maxLines: 2)
                 if let p = input["prompt"]?.stringValue { Text(p).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(3) }
             default:
-                Code(text: input.pretty(), maxLines: 10)
+                KeyValueDetail(input: input)
             }
+        }
+    }
+}
+
+/// Неизвестный инструмент (Workflow, MCP…): поля «ключ — значение», длинные значения обрезаны.
+/// Раньше показывался весь JSON, и одна строка в десятки тысяч символов занимала весь экран.
+struct KeyValueDetail: View {
+    let input: JSONValue
+    static let maxFields = 8
+
+    var body: some View {
+        if let obj = input.objectValue, !obj.entries.isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(Array(obj.entries.prefix(Self.maxFields).enumerated()), id: \.offset) { _, e in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: e.key).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                        Code(text: e.value.stringValue ?? e.value.pretty(), maxLines: 6, maxChars: 500)
+                    }
+                }
+                if obj.entries.count > Self.maxFields {
+                    Text("… ещё полей: \(obj.entries.count - Self.maxFields)").font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+            }
+        } else {
+            Code(text: input.pretty(), maxLines: 10)
         }
     }
 }
@@ -141,29 +355,44 @@ struct PathLine: View {
 }
 
 /// Код без интерпретации: только текст, никаких ссылок и разметки.
+/// Обрезается и по строкам, и по символам: одна строка без переносов тоже может быть огромной.
 struct Code: View {
     let text: String
     var maxLines: Int = 8
+    var maxChars: Int = 1500
     var color: Color = .primary
     var background: Color = Color.primary.opacity(0.06)
 
     var body: some View {
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        let shown = lines.prefix(maxLines).joined(separator: "\n")
-        let more = lines.count - maxLines
+        let (shown, moreLines, moreChars) = Self.clip(text, maxLines: maxLines, maxChars: maxChars)
         VStack(alignment: .leading, spacing: 2) {
             Text(verbatim: shown)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(color)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            if more > 0 {
-                Text("… ещё \(more) строк").font(.system(size: 10)).foregroundStyle(.tertiary)
+            if moreLines > 0 {
+                Text("… ещё \(moreLines) строк").font(.system(size: 10)).foregroundStyle(.tertiary)
+            } else if moreChars > 0 {
+                Text("… ещё \(moreChars) символов").font(.system(size: 10)).foregroundStyle(.tertiary)
             }
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 7).fill(background))
+    }
+
+    /// Первые `maxLines` строк, но не больше `maxChars` символов; сколько строк и символов осталось за кадром.
+    static func clip(_ text: String, maxLines: Int, maxChars: Int) -> (String, Int, Int) {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        var shown = lines.prefix(maxLines).joined(separator: "\n")
+        let moreLines = max(0, lines.count - maxLines)
+        var moreChars = 0
+        if shown.count > maxChars {
+            moreChars = text.count - maxChars
+            shown = String(shown.prefix(maxChars)) + "…"
+        }
+        return (shown, moreLines, moreChars)
     }
 }
 
@@ -189,7 +418,7 @@ struct DiffBlock: View {
 
 struct QuestionView: View {
     @ObservedObject var model: AppModel
-    var desktop = false
+    var host = HostInfo()
     let request: PendingRequest
     let questions: [Question]
 
@@ -206,6 +435,43 @@ struct QuestionView: View {
                 Spacer()
                 Countdown(deadline: request.deadline)
             }
+            // Много вопросов с вариантами могут быть выше экрана — прокручиваются, кнопка «Ответить» остаётся видна.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) { questionList }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 380)
+            HStack(spacing: 8) {
+                BigButton(title: "Ответить", symbol: "paperplane.fill", prominent: true) { submit() }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!ready)
+                    .help("Ответить (⌘↩)")
+                Button { model.decide(request.id, .passthrough) } label: {
+                    Label(host.passthroughTitle, systemImage: host.placeSymbol)
+                }
+                .controlSize(.small)
+                .help("Ответить там, где работает агент: окошко закроется, откроется его сессия")
+            }
+        }
+        .background {
+            // Цифры 1…9 выбирают вариант первого вопроса, пока не печатаем свой ответ.
+            if focusedCustom == nil, let q = questions.first {
+                ZStack {
+                    ForEach(0..<min(q.options.count, 9), id: \.self) { oi in
+                        Button("") { toggle(0, oi, multi: q.multiSelect) }
+                            .keyboardShortcut(KeyEquivalent(Character("\(oi + 1)")), modifiers: [])
+                    }
+                }
+                .frame(width: 0, height: 0)
+                .opacity(0)
+                .accessibilityHidden(true)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.09)))
+    }
+
+    @ViewBuilder private var questionList: some View {
             ForEach(Array(questions.enumerated()), id: \.offset) { qi, q in
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -233,36 +499,6 @@ struct QuestionView: View {
                         .onSubmit { if ready { submit() } }
                 }
             }
-            HStack(spacing: 6) {
-                Button { submit() } label: { Label("Ответить", systemImage: "paperplane.fill").frame(minWidth: 90) }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!ready)
-                    .help("Ответить (⌘↩)")
-                Spacer()
-                Button { model.decide(request.id, .passthrough) } label: {
-                    Label(desktop ? "В приложении" : "В терминале", systemImage: desktop ? "macwindow" : "terminal")
-                }
-                .help("Ответить там, где работает агент: окошко закроется, откроется его сессия")
-            }
-            .controlSize(.small)
-        }
-        .background {
-            // Цифры 1…9 выбирают вариант первого вопроса, пока не печатаем свой ответ.
-            if focusedCustom == nil, let q = questions.first {
-                ZStack {
-                    ForEach(0..<min(q.options.count, 9), id: \.self) { oi in
-                        Button("") { toggle(0, oi, multi: q.multiSelect) }
-                            .keyboardShortcut(KeyEquivalent(Character("\(oi + 1)")), modifiers: [])
-                    }
-                }
-                .frame(width: 0, height: 0)
-                .opacity(0)
-                .accessibilityHidden(true)
-            }
-        }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.09)))
     }
 
     private func toggle(_ qi: Int, _ oi: Int, multi: Bool) {
@@ -342,6 +578,7 @@ struct ExpiredView: View {
             switch request.kind {
             case .permission(let t, _): return "Запрос разрешения (\(t))"
             case .question: return "Вопрос агента"
+            case .plan: return "План на одобрение"
             }
         }()
         VStack(alignment: .leading, spacing: 6) {
@@ -349,11 +586,11 @@ struct ExpiredView: View {
                 Image(systemName: "clock.badge.exclamationmark").foregroundStyle(Color(red: 0.75, green: 0.5, blue: 0.25))
                 Text("Просрочено").font(.system(size: 12, weight: .semibold))
             }
-            Text("\(what) ждал слишком долго и ушёл в \(session.host.isDesktopApp ? "приложение" : "терминал"). Ответьте там.")
+            Text("\(what) ждал слишком долго и ушёл в \(session.host.placeTo). Ответь там.")
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button { model.open(session.id) } label: {
-                    Label(session.host.isDesktopApp ? "Открыть сессию" : "Открыть терминал", systemImage: "arrow.up.forward.app")
+                    Label(session.host.openTitle, systemImage: "arrow.up.forward.app")
                 }
                     .buttonStyle(.borderedProminent)
                 Button("Убрать") { model.dismissExpired(session.id) }

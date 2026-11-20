@@ -87,6 +87,37 @@ enum SelfTest {
         o = finish(p, out)
         check("хук вернул deny + причину", o.contains("\"behavior\":\"deny\"") && o.contains("не сейчас"), o)
 
+        print("Разрешить всегда (шаблон правила)")
+        (p, out) = spawn("permission", "permission-PermissionRequest")
+        pump(3) { model.store.session(key)?.activePending != nil }
+        if let pend = model.store.session(key)?.activePending {
+            check("подсказки Claude дошли до окошка", !pend.suggestions.isEmpty)
+            let rule: JSONValue = ["type": "addRules", "behavior": "allow", "destination": "localSettings",
+                                   "rules": [["toolName": "Bash", "ruleContent": "node *"]]]
+            model.decide(pend.id, .allowWith([rule]))
+        } else { check("запрос пришёл", false) }
+        o = finish(p, out)
+        check("allow + updatedPermissions", o.contains("\"behavior\":\"allow\"") && o.contains("\"updatedPermissions\"")
+              && o.contains("node *"), o)
+
+        print("План: одобрить и принимать правки")
+        (p, out) = spawn("permission", "permission-ExitPlanMode")
+        pump(3) { model.store.session(key)?.activePending != nil }
+        if let pend = model.store.session(key)?.activePending {
+            check("окошко плана", pend.kind.isPlan, "\(pend.kind)")
+            model.decide(pend.id, .allowWith(PermissionRules.planApproval(acceptEdits: true)))
+        } else { check("план пришёл", false) }
+        o = finish(p, out)
+        check("allow + updatedInput с планом + setMode acceptEdits",
+              o.contains("\"updatedInput\"") && o.contains("Добавить фильтр") && o.contains("acceptEdits"), o)
+
+        print("План: доработать с замечанием")
+        (p, out) = spawn("permission", "permission-ExitPlanMode")
+        pump(3) { model.store.session(key)?.activePending != nil }
+        if let rid = model.store.session(key)?.activePending?.id { model.decide(rid, .deny(reason: "без миграций")) }
+        o = finish(p, out)
+        check("deny + замечание к плану", o.contains("\"behavior\":\"deny\"") && o.contains("без миграций"), o)
+
         print("Ответ на вопрос")
         (p, out) = spawn("question", "question-PreToolUse-AskUserQuestion")
         pump(3) { model.store.session(key)?.activePending != nil }
@@ -168,6 +199,9 @@ enum UITest {
         setenv("AGENTHUD_SUPPORT_DIR", dir.path, 1)       // журнал решений — во временную папку
         defer { try? FileManager.default.removeItem(at: dir) }
         let model = AppModel(settings: Settings())
+        // Позиция по умолчанию, а не оставшаяся от прошлых запусков (у отладочной сборки свои настройки).
+        model.settings.anchor = nil
+        model.settings.anchorLeft = false
         Demo.populate(model)
         let hud = HUDController(model: model)
         hud.updateVisibility()
@@ -175,8 +209,10 @@ enum UITest {
         let panel = hud.panel
         check("панель показана", panel.isVisible)
         let h = panel.frame.height, w = panel.frame.width
-        check("панель в правом верхнем углу", (NSScreen.main.map { abs(panel.frame.maxX - $0.visibleFrame.maxX) < 20 } ?? false),
-              "\(panel.frame)")
+        let home = panel.screen ?? NSScreen.screens.first
+        check("панель в правом верхнем углу основного экрана", panel.screen == NSScreen.screens.first
+                && (home.map { abs(panel.frame.maxX - $0.visibleFrame.maxX) < 20 } ?? false),
+              "\(panel.frame) / \(home?.visibleFrame ?? .zero)")
 
         func click(_ p: NSPoint) {
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
@@ -219,9 +255,89 @@ enum UITest {
               "\(model.store.session("claude:demo-a")?.state as Any)")
 
         print("Скрытие сессии")
-        model.hide("codex:demo-d")
+        model.hide("claude:demo-d")
         pump(0.4)
-        check("сессия скрыта", !model.visibleSessions.contains { $0.id == "codex:demo-d" })
+        check("сессия скрыта", !model.visibleSessions.contains { $0.id == "claude:demo-d" })
+
+        print("Метки проектов под иконками")
+        let labels = model.projectShortLabels
+        check("у каждой видимой сессии своя метка", Set(model.visibleSessions.map { labels[$0.cwd] ?? "" }).count
+                == Set(model.visibleSessions.map(\.cwd)).count, "\(labels)")
+
+        print("Без мерцания: окно меняет рамку разово, анимации иконок не перевешиваются")
+        model.settings.animations = true
+        model.selectedKey = nil
+        model.selectedByUser = false
+        pump(0.6)
+        let frames0 = hud.framesApplied, installs0 = MotionClock.installs
+        model.selectedKey = "claude:demo-b"
+        model.selectedByUser = true
+        pump(1.0)
+        let openFrames = hud.framesApplied - frames0
+        check("открытие окошка: рамка окна меняется ≤ 2 раз (было ~70 в секунду)", openFrames <= 2, "\(openFrames)")
+        model.selectedKey = nil
+        pump(1.0)
+        let closeFrames = hud.framesApplied - frames0 - openFrames
+        check("закрытие окошка: рамка окна меняется ≤ 2 раз", closeFrames <= 2, "\(closeFrames)")
+        check("анимации иконок не перевешивались при открытии и закрытии", MotionClock.installs == installs0,
+              "перевешиваний: \(MotionClock.installs - installs0)")
+        let installs1 = MotionClock.installs
+        model.inject([AgentEvent(kind: .claude, sessionId: "demo-new", cwd: "/Users/dev/acme-docs", host: Demo.vscodeHost,
+                                 time: Date(), body: .promptSubmitted("Новая задача"))])
+        pump(1.0)
+        check("новая сессия: перевешена только её анимация", MotionClock.installs - installs1 <= 1,
+              "перевешиваний: \(MotionClock.installs - installs1)")
+        let pad = HUDController.shadowPad
+        let vf = (panel.screen ?? NSScreen.screens.first)?.visibleFrame ?? .zero
+
+        print("Огромный ввод не выталкивает кнопки за экран")
+        let huge = String(repeating: "export const meta = { name: 'x' } // очень длинная строка без переносов ", count: 900)
+        model.inject([
+            AgentEvent(kind: .claude, sessionId: "demo-big", cwd: "/Users/dev/acme-big", host: Demo.vscodeHost,
+                       time: Date(), body: .promptSubmitted("Огромный запрос")),
+            AgentEvent(kind: .claude, sessionId: "demo-big", cwd: "/Users/dev/acme-big", host: Demo.vscodeHost, time: Date(),
+                       body: .permissionRequested(requestId: "big-1", toolName: "Workflow", input: ["script": .string(huge)],
+                                                  deadline: Date().addingTimeInterval(500), suggestions: [])),
+        ])
+        model.selectedKey = "claude:demo-big"
+        model.selectedByUser = true
+        pump(1.0)
+        check("окно с огромным вводом не выше экрана", panel.frame.height <= vf.height + 2 * pad + 1,
+              "окно \(panel.frame.height) при экране \(vf.height)")
+        check("окно с огромным вводом в пределах экрана", vf.insetBy(dx: -pad - 1, dy: -pad - 1).contains(panel.frame),
+              "\(panel.frame) / \(vf)")
+        check("окошко компактное: подробности прокручиваются", panel.frame.height < 760, "\(panel.frame.height)")
+
+        print("HUD у левого края: окошко раскрывается вправо и остаётся на экране")
+        model.settings.anchorLeft = true
+        model.settings.anchor = CGPoint(x: vf.minX + 10, y: vf.maxY + 2)
+        hud.refreshPlacement()
+        pump(0.6)
+        check("левый край окна у якоря", abs(panel.frame.minX - (vf.minX + 10)) < 2, "\(panel.frame.minX) vs \(vf.minX + 10)")
+        check("окно в пределах экрана", vf.insetBy(dx: -pad - 1, dy: -pad - 1).contains(panel.frame), "\(panel.frame) / \(vf)")
+
+        print("HUD бросили на строку меню — возвращается на экран")
+        model.selectedKey = nil
+        pump(0.4)
+        panel.setFrameOrigin(NSPoint(x: vf.midX + 120, y: vf.maxY + 60 - panel.frame.height + 40))
+        pump(1.0)
+        check("верх окна не выше видимой части экрана", panel.frame.maxY <= vf.maxY + pad + 1, "\(panel.frame.maxY) vs \(vf.maxY)")
+        check("сторона определилась по месту: правая половина → якорь справа", model.settings.anchorLeft == false)
+        model.settings.anchor = nil
+        model.settings.anchorLeft = false
+        hud.refreshPlacement()
+        model.hide("claude:demo-big")
+        model.hide("claude:demo-new")
+        pump(0.3)
+
+        print("Карта агентов")
+        let map = AgentMapController(model: model)
+        map.show()
+        pump(0.6)
+        check("окно карты открыто", map.isShown)
+        map.close()
+        pump(0.3)
+        check("окно карты закрыто", !map.isShown)
 
         print("Панель в строке меню")
         let menu = StatusMenu(model: model, hud: hud)

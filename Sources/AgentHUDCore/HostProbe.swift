@@ -55,7 +55,8 @@ public enum HostProbe {
             processChain: chain.prefix(8).map(\.name),
             appBundleId: app?.bundleId,
             appName: app?.name,
-            hostSessionId: env["CLAUDE_CODE_HOST_SESSION_ID"].flatMap { $0.isEmpty ? nil : $0 }
+            hostSessionId: env["CLAUDE_CODE_HOST_SESSION_ID"].flatMap { $0.isEmpty ? nil : $0 },
+            entrypoint: env["CLAUDE_CODE_ENTRYPOINT"].flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 
@@ -95,7 +96,7 @@ public enum HostProbe {
         chain.first { !shells.contains($0.name) } ?? chain.first
     }
 
-    /// HUD показывает сессии, за которыми сидит человек: терминал и десктопные приложения Claude и Codex.
+    /// HUD показывает сессии, за которыми сидит человек: терминал, VS Code и десктопные приложения Claude и Codex.
     /// SDK, `claude -p`, `codex exec` из скриптов и служебные запросы приложений идут мимо — иначе
     /// синхронный хук подвешивал бы автоматизацию до ответа в HUD. `AGENTHUD_ANY_HOST=1` снимает фильтр (для тестов).
     public static func isInteractive(kind: AgentKind, host: HostInfo, env: [String: String]) -> Bool {
@@ -106,10 +107,13 @@ public enum HostProbe {
             case "claude-desktop":
                 // У настоящей сессии приложения есть свой id (local_…); у служебных запросов — нет.
                 return env["CLAUDE_CODE_HOST_SESSION_ID"]?.isEmpty == false
+            case HostInfo.vscodeEntrypoint:
+                // Панель чата расширения Claude Code. TTY нет; признак живого человека — процесс внутри VS Code.
+                return host.appBundleId.map(HostInfo.editorApps.contains) == true
             case nil, "cli":
                 return host.tty != nil
             default:
-                return false   // sdk-*, расширения редакторов
+                return false   // sdk-*, другие редакторы
             }
         case .codex:
             return host.tty != nil || host.appBundleId == HostInfo.codexDesktop
