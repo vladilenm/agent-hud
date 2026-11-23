@@ -153,6 +153,68 @@ enum SelfTest {
     }
 }
 
+/// `AgentHUD --placement-test`: window geometry and persistence without a WindowServer.
+enum PlacementTest {
+    static func run() -> Int32 {
+        var failures = 0
+        func check(_ name: String, _ result: Bool) {
+            print((result ? "  ok   " : "  FAIL ") + name)
+            if !result { failures += 1 }
+        }
+
+        let upperLeftDisplay = CGRect(x: -1280, y: 940, width: 1280, height: 860)
+        let size = CGSize(width: 380, height: 300)
+        let offset = CGPoint(x: 12, y: 8)
+        for corner in HUDCorner.allCases {
+            let frame = corner.frame(size: size, in: upperLeftDisplay, offset: offset)
+            check("HUD \(corner.rawValue) stays inside a vertically offset display", upperLeftDisplay.contains(frame))
+            check("HUD \(corner.rawValue) restores a dragged offset", corner.offset(of: frame, in: upperLeftDisplay) == offset)
+            let smaller = corner.frame(size: CGSize(width: 120, height: 64), in: upperLeftDisplay, offset: offset)
+            check("HUD \(corner.rawValue) keeps its anchor when resized", corner.offset(of: smaller, in: upperLeftDisplay) == offset)
+        }
+
+        let placeholder = CGRect(x: -80, y: 940, width: 18, height: 20)
+        let fullScreen = CGRect(x: -1280, y: 940, width: 1280, height: 900)
+        check("Menu ignores a status item whose window has not been positioned",
+              WindowPlacement.statusButton(placeholder, in: fullScreen, above: upperLeftDisplay) == nil)
+        let positionedButton = CGRect(x: -90, y: 1804, width: 35, height: 24)
+        check("Menu accepts the status item in its display menu bar",
+              WindowPlacement.statusButton(positionedButton, in: fullScreen, above: upperLeftDisplay) == positionedButton)
+        let button = CGRect(x: -90, y: 1780, width: 35, height: 24)
+        let menu = WindowPlacement.menuFrame(size: size, in: upperLeftDisplay, button: button, offset: nil)
+        check("Menu stays below the status item, including its right edge", menu.maxY == button.minY && menu.maxX == 0)
+        let dragOffset = CGPoint(x: 12, y: 45)
+        let moved = WindowPlacement.menuFrame(size: size, in: upperLeftDisplay, button: nil, offset: dragOffset)
+        let restoredWithButton = WindowPlacement.menuFrame(size: size, in: upperLeftDisplay, button: button, offset: dragOffset)
+        check("Menu restores the display-relative offset after the status item becomes available",
+              moved == restoredWithButton && moved.minX == upperLeftDisplay.minX + dragOffset.x &&
+              moved.maxY == upperLeftDisplay.maxY - dragOffset.y)
+        let cramped = CGRect(x: 0, y: -570, width: 500, height: 440)
+        let tall = WindowPlacement.menuFrame(size: CGSize(width: 340, height: 860), in: cramped, button: nil,
+                                             offset: CGPoint(x: 850, y: 500))
+        check("A short display fits a scrollable menu after an out-of-bounds drag", cramped.contains(tall) && tall.height == cramped.height)
+
+        let domain = "dev.agenthud.placement-test.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: domain) else { return 1 }
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let settings = Settings(defaults: defaults)
+        check("Existing installations default to the primary display and top-right corner", settings.hudDisplay.isEmpty && settings.hudCorner == .topRight)
+        settings.hudDisplay = "external"
+        settings.hudCorner = .bottomLeft
+        settings.setHUDOffset(offset, on: "external")
+        settings.setMenuOffset(offset, on: "external")
+        settings.setMenuOffset(.zero, on: "primary")
+        let restored = Settings(defaults: defaults)
+        check("HUD display, corner and offset survive reload", restored.hudDisplay == "external" &&
+              restored.hudCorner == .bottomLeft && restored.hudOffset(on: "external") == offset)
+        check("Menu offsets survive reload independently by display",
+              restored.menuOffset(on: "external") == offset && restored.menuOffset(on: "primary") == .zero)
+        restored.setMenuOffset(nil, on: "external")
+        check("Reset only clears that menu position", restored.menuOffset(on: "external") == nil && restored.menuOffset(on: "primary") == .zero)
+        return failures == 0 ? 0 : 1
+    }
+}
+
 /// `AgentHUD --uitest`: настоящая панель HUD с демо-сессиями, синтетические клики и клавиши.
 @MainActor
 enum UITest {
@@ -167,15 +229,23 @@ enum UITest {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ahud-ui-\(getpid())")
         setenv("AGENTHUD_SUPPORT_DIR", dir.path, 1)       // журнал решений — во временную папку
         defer { try? FileManager.default.removeItem(at: dir) }
-        let model = AppModel(settings: Settings())
+        let domain = "dev.agenthud.ui-test.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: domain), let screen = NSScreen.screens.first else {
+            print("UI tests require a macOS display.")
+            return 1
+        }
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let model = AppModel(settings: Settings(defaults: defaults))
         Demo.populate(model)
         let hud = HUDController(model: model)
         hud.updateVisibility()
-        pump(1.0)
         let panel = hud.panel
-        check("панель показана", panel.isVisible)
+        let layoutDeadline = Date().addingTimeInterval(5)
+        while panel.frame.width <= 80, Date() < layoutDeadline { pump(0.05) }
+        check("панель показана и получила размер содержимого", panel.isVisible && panel.frame.width > 80)
+        guard panel.isVisible, panel.frame.width > 80 else { return 1 }
         let h = panel.frame.height, w = panel.frame.width
-        check("панель в правом верхнем углу", (NSScreen.main.map { abs(panel.frame.maxX - $0.visibleFrame.maxX) < 20 } ?? false),
+        check("панель в правом верхнем углу", abs(panel.frame.maxX - screen.visibleFrame.maxX) < 20,
               "\(panel.frame)")
 
         func click(_ p: NSPoint) {
@@ -223,17 +293,77 @@ enum UITest {
         pump(0.4)
         check("сессия скрыта", !model.visibleSessions.contains { $0.id == "codex:demo-d" })
 
+        hud.setCorner(.bottomLeft)
+        pump(0.4)
+        check("HUD ушёл в левый нижний угол",
+              abs(panel.frame.minX - screen.visibleFrame.minX) < 20 && abs(panel.frame.minY - screen.visibleFrame.minY) < 20)
+        model.settings.hudDisplay = "disconnected-test-display"
+        pump(0.2)
+        check("Для отключённого дисплея HUD остаётся на основном",
+              model.settings.hudDisplay == "disconnected-test-display" && screen.visibleFrame.contains(panel.frame))
+        if let otherScreen = NSScreen.screens.dropFirst().first {
+            model.settings.hudDisplay = otherScreen.placementID
+            pump(0.3)
+            check("HUD перемещается на выбранный дисплей",
+                  otherScreen.visibleFrame.contains(panel.frame))
+        } else {
+            print("  skip Перемещение HUD на второй дисплей: доступен один дисплей")
+        }
+        model.settings.hudDisplay = ""
+        pump(0.2)
+        let rowOrigin = panel.frame.origin
+        model.select("codex:demo-c")
+        pump(0.5)
+        check("Карточка растёт вверх от нижнего угла", panel.frame.origin == rowOrigin && panel.frame.height > h + 100)
+
         print("Панель в строке меню")
         let menu = StatusMenu(model: model, hud: hud)
-        menu.show()
+        let menuWindow = menu.shownWindow
+        let clickLocation = CGPoint(x: screen.frame.midX, y: screen.frame.maxY - 2)
+        pump(0.2)
+        menu.show(clickLocation: clickLocation)
         pump(0.6)
-        check("поповер открыт", menu.isShown)
-        let screenH = NSScreen.main?.visibleFrame.height ?? 900
-        check("помещается по высоте", menu.shownSize.height > 300 && menu.shownSize.height < screenH,
-              "\(menu.shownSize) при экране \(screenH)")
+        check("панель открыта", menu.isShown)
+        if let menuScreen = menuWindow.screen {
+            let bounds = menuScreen.menuWindowBounds
+            let initial = menuWindow.frame
+            let dx: CGFloat = initial.minX - bounds.minX > 50 ? -50 : 50
+            check("панель открылась ниже строки меню и внутри экрана", initial.height > 100 && bounds.contains(initial),
+                  "\(initial) за пределами \(bounds)")
+            menuWindow.setFrameOrigin(CGPoint(x: initial.minX + dx, y: initial.minY - 45))
+            menu.finishDrag()
+            let moved = menuWindow.frame
+            check("позиция панели изменилась", moved.origin != initial.origin, "\(initial) → \(moved)")
+            menu.close()
+            menu.show(clickLocation: clickLocation)
+            pump(0.6)
+            let reopened = menuWindow.frame
+            check("позиция восстановлена при открытии", reopened.minX == moved.minX && reopened.maxY == moved.maxY,
+                  "\(moved) → \(reopened)")
+            menu.resetPosition()
+            pump(0.2)
+            let reset = menuWindow.frame
+            let offsetCleared = model.settings.menuOffset(on: menuScreen.placementID) == nil
+            menu.close()
+            menu.show(clickLocation: clickLocation)
+            pump(0.6)
+            let unmodified = menuWindow.frame
+            check("сброс возвращает панель под значок",
+                  offsetCleared && bounds.contains(reset) && bounds.contains(unmodified) &&
+                  reset.maxY > moved.maxY && unmodified.maxY > moved.maxY,
+                  "\(moved) → \(reset) → \(unmodified)")
+        } else {
+            check("открытая панель находится на дисплее", false)
+        }
+        if let otherScreen = NSScreen.screens.dropFirst().first {
+            menu.close()
+            menu.show(clickLocation: CGPoint(x: otherScreen.frame.midX, y: otherScreen.frame.maxY - 2))
+            pump(0.3)
+            check("панель открылась на экране нажатой иконки", otherScreen.menuWindowBounds.contains(menuWindow.frame))
+        }
         menu.close()
         pump(0.4)
-        check("поповер закрыт", !menu.isShown, "isShown=\(menu.isShown) окно видно=\(menu.windowVisible)")
+        check("панель закрыта", !menu.isShown)
 
         panel.orderOut(nil)
         print()

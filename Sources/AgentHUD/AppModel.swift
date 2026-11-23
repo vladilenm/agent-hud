@@ -23,7 +23,7 @@ enum AvatarStyle: String, CaseIterable, Identifiable {
 
 /// Настройки в UserDefaults.
 final class Settings: ObservableObject {
-    private let d = UserDefaults.standard
+    private let d: UserDefaults
 
     @Published var avatarStyle: AvatarStyle { didSet { d.set(avatarStyle.rawValue, forKey: "avatarStyle") } }
     @Published var hideWhenNothingWaits: Bool { didSet { d.set(hideWhenNothingWaits, forKey: "hideWhenNothingWaits") } }
@@ -34,19 +34,43 @@ final class Settings: ObservableObject {
     @Published var notifications: Bool { didSet { d.set(notifications, forKey: "notifications") } }
     @Published var animations: Bool { didSet { d.set(animations, forKey: "animations") } }
 
-    /// Правый верхний угол HUD в координатах экрана; nil — по умолчанию.
-    var anchor: CGPoint? {
-        get {
-            guard d.object(forKey: "anchorX") != nil else { return nil }
-            return CGPoint(x: d.double(forKey: "anchorX"), y: d.double(forKey: "anchorY"))
-        }
-        set {
-            if let p = newValue { d.set(p.x, forKey: "anchorX"); d.set(p.y, forKey: "anchorY") }
-            else { d.removeObject(forKey: "anchorX"); d.removeObject(forKey: "anchorY") }
-        }
+    @Published var hudDisplay: String { didSet { d.set(hudDisplay, forKey: "hudDisplay") } }
+    @Published var hudCorner: HUDCorner { didSet { d.set(hudCorner.rawValue, forKey: "hudCorner") } }
+
+    var legacyHUDAnchor: CGPoint? {
+        guard d.object(forKey: "anchorX") != nil, d.object(forKey: "anchorY") != nil else { return nil }
+        return CGPoint(x: d.double(forKey: "anchorX"), y: d.double(forKey: "anchorY"))
     }
 
-    init() {
+    func clearLegacyHUDAnchor() {
+        d.removeObject(forKey: "anchorX")
+        d.removeObject(forKey: "anchorY")
+    }
+
+    func hudOffset(on display: String) -> CGPoint? { offset(for: "hudOffsets", on: display) }
+    func menuOffset(on display: String) -> CGPoint? { offset(for: "menuOffsets", on: display) }
+    func setHUDOffset(_ point: CGPoint?, on display: String) { setOffset(point, for: "hudOffsets", on: display) }
+    func setMenuOffset(_ point: CGPoint?, on display: String) { setOffset(point, for: "menuOffsets", on: display) }
+    func clearHUDOffsets() { d.removeObject(forKey: "hudOffsets") }
+
+    private func offset(for key: String, on display: String) -> CGPoint? {
+        (d.dictionary(forKey: key)?[display] as? String).map(NSPointFromString)
+    }
+
+    private func setOffset(_ point: CGPoint?, for key: String, on display: String) {
+        var offsets = d.dictionary(forKey: key) ?? [:]
+        if let point {
+            offsets[display] = NSStringFromPoint(point)
+        } else {
+            offsets.removeValue(forKey: display)
+        }
+        d.set(offsets, forKey: key)
+    }
+
+    init(defaults: UserDefaults = .standard) {
+        d = defaults
+        hudDisplay = d.string(forKey: "hudDisplay") ?? ""
+        hudCorner = d.string(forKey: "hudCorner").flatMap(HUDCorner.init(rawValue:)) ?? .topRight
         avatarStyle = AvatarStyle(rawValue: d.string(forKey: "avatarStyle") ?? "") ?? .logo
         // Логотипы агентов стали стилем по умолчанию — один раз переключаем и тех, у кого был выбран персонаж.
         if !d.bool(forKey: "logoStyleIntroduced") {

@@ -3,22 +3,38 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// Иконка в строке меню со счётчиком ожидающих и панель управления (поповер на SwiftUI).
+/// Иконка в строке меню со счётчиком ожидающих и плавающая панель управления.
 @MainActor
-final class StatusMenu: NSObject, NSPopoverDelegate {
+final class StatusMenu: NSObject {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let model: AppModel
     private let hud: HUDController
-    private let popover = NSPopover()
+    private let window = MenuWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+    private var host: NSHostingController<MenuWindowContent>?
+    private var screenID: String?
+    private var buttonFrame: CGRect?
+    private var buttonScreenID: String?
+    private var measuredHeight: CGFloat = 420
+    private var clickMonitors: [Any] = []
     private var cancellables = Set<AnyCancellable>()
 
     init(model: AppModel, hud: HUDController) {
         self.model = model
         self.hud = hud
         super.init()
-        popover.behavior = .transient
-        popover.animates = true
-        popover.delegate = self
+        window.isReleasedWhenClosed = false
+        window.isFloatingPanel = true
+        window.level = .popUpMenu
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.hasShadow = true
+        window.hidesOnDeactivate = false
+        window.dismiss = { [weak self] in self?.close() }
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.screenConfigurationChanged() }
+            .store(in: &cancellables)
         if let b = item.button {
             b.target = self
             b.action = #selector(toggle(_:))
@@ -43,32 +59,103 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
         b.toolTip = waiting > 0 ? "AgentHUD: ждут тебя — \(waiting)" : "AgentHUD"
     }
 
-    // MARK: - Поповер
+    var isShown: Bool { window.isVisible }
+    var shownWindow: NSWindow { window }
 
-    var isShown: Bool { popover.isShown }
-    var shownSize: CGSize { popover.contentViewController?.view.fittingSize ?? .zero }
-    func close() { closePopover() }
-    var windowVisible: Bool { popover.contentViewController?.view.window?.isVisible ?? false }
-
-    /// Закрыть без анимации: анимированное закрытие NSPopover иногда не срабатывает,
-    /// пока идёт анимация показа.
-    private func closePopover() {
-        popover.animates = false
-        popover.close()
-        popover.animates = true
+    func close() {
+        window.orderOut(nil)
+        clickMonitors.forEach(NSEvent.removeMonitor)
+        clickMonitors.removeAll()
     }
 
     @objc private func toggle(_ sender: Any?) {
-        if popover.isShown { closePopover(); return }
-        show()
+        if isShown { close(); return }
+        switch NSApp.currentEvent?.type {
+        case .leftMouseUp, .rightMouseUp: show(clickLocation: NSEvent.mouseLocation)
+        default: show()
+        }
     }
 
-    func show() {
-        guard let b = item.button else { return }
-        popover.contentViewController = NSHostingController(rootView: panel())
+    func show(clickLocation: CGPoint? = nil) {
+        guard !isShown, let button = item.button, let statusWindow = button.window else { return }
+        let anchor = statusWindow.convertToScreen(button.convert(button.bounds, to: nil))
+        let screens = NSScreen.screens
+        let clickedScreen = clickLocation.flatMap { point in screens.first { $0.frame.contains(point) } }
+        guard let screen = clickedScreen ?? statusWindow.screen ?? screens.first else { return }
+        screenID = screen.placementID
+        buttonScreenID = screen.placementID
+        let bounds = screen.menuWindowBounds
+        buttonFrame = WindowPlacement.statusButton(anchor, in: screen.frame, above: bounds)
+            ?? clickLocation.map { CGRect(x: $0.x, y: bounds.maxY, width: 0, height: 0) }
+        measuredHeight = 420
+        let host = NSHostingController(rootView: content())
+        host.sizingOptions = []
+        self.host = host
+        window.contentViewController = host
+        placeWindow(on: screen)
         NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
+        window.makeKeyAndOrderFront(nil)
+
+        if let monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { [weak self] _ in
+            self?.close()
+        }) { clickMonitors.append(monitor) }
+        if let monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { [weak self] event in
+            if let self, event.window === self.hud.panel { self.close() }
+            return event
+        }) { clickMonitors.append(monitor) }
+    }
+
+    private var placementScreen: NSScreen? {
+        NSScreen.screens.first { $0.placementID == screenID } ?? NSScreen.screens.first
+    }
+
+    private func placeWindow(on screen: NSScreen) {
+        let bounds = screen.menuWindowBounds
+        let frame = WindowPlacement.menuFrame(size: CGSize(width: ControlPanelView.width, height: measuredHeight),
+                                              in: bounds,
+                                              button: screen.placementID == buttonScreenID ? buttonFrame : nil,
+                                              offset: model.settings.menuOffset(on: screen.placementID))
+        if window.frame != frame { window.setFrame(frame, display: true) }
+    }
+
+    private func screenConfigurationChanged() {
+        guard isShown, let screen = placementScreen else { return }
+        if let button = item.button, let statusWindow = button.window, let statusScreen = statusWindow.screen {
+            buttonScreenID = statusScreen.placementID
+            let anchor = statusWindow.convertToScreen(button.convert(button.bounds, to: nil))
+            buttonFrame = WindowPlacement.statusButton(anchor, in: statusScreen.frame, above: statusScreen.menuWindowBounds)
+        } else {
+            buttonScreenID = nil
+            buttonFrame = nil
+        }
+        placeWindow(on: screen)
+    }
+
+    func finishDrag() {
+        guard let screen = window.screen ?? placementScreen else { return }
+        screenID = screen.placementID
+        let offset = HUDCorner.topLeft.offset(of: window.frame, in: screen.menuWindowBounds)
+        model.settings.setMenuOffset(CGPoint(x: max(0, offset.x), y: max(0, offset.y)), on: screen.placementID)
+        placeWindow(on: screen)
+    }
+
+    func resetPosition() {
+        if let screen = placementScreen {
+            model.settings.setMenuOffset(nil, on: screen.placementID)
+        }
+        screenID = buttonScreenID
+        if let screen = placementScreen {
+            model.settings.setMenuOffset(nil, on: screen.placementID)
+            placeWindow(on: screen)
+        }
+    }
+
+    private func content() -> MenuWindowContent {
+        MenuWindowContent(panel: panel(), onSize: { [weak self] height in
+            guard let self, self.isShown, let screen = self.placementScreen, self.measuredHeight != height else { return }
+            self.measuredHeight = height
+            self.placeWindow(on: screen)
+        })
     }
 
     /// Статусы конфигов и автозапуска читаются при каждом открытии (и после действий).
@@ -80,13 +167,13 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
     }
 
     private func refresh() {
-        guard popover.isShown, let host = popover.contentViewController as? NSHostingController<ControlPanelView> else { return }
-        host.rootView = panel()
+        guard isShown else { return }
+        host?.rootView = content()
     }
 
-    /// Диалоги (NSAlert) показываем после закрытия поповера, иначе он перекрывает их.
+    /// Диалоги (NSAlert) показываем после закрытия панели, иначе она перекрывает их.
     private func afterClose(_ body: @escaping @MainActor () -> Void) {
-        closePopover()
+        close()
         Task { @MainActor in body() }
     }
 
@@ -97,10 +184,10 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
             self.model.settings.hudVisible = true
             self.model.selectedKey = key
             self.model.selectedByUser = true
-            self.closePopover()
+            self.close()
         }
         a.focusSession = { [weak self] key in
-            self?.closePopover()
+            self?.close()
             self?.model.open(key)
         }
         a.connect = { [weak self] kind in
@@ -126,12 +213,17 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
             }
             self?.refresh()
         }
-        a.resetPosition = { [weak self] in
-            self?.hud.resetPosition()
-            self?.closePopover()
+        a.setHUDDisplay = { [weak self] display in
+            guard let self else { return }
+            self.model.settings.clearLegacyHUDAnchor()
+            self.model.settings.hudDisplay = display
         }
+        a.setHUDCorner = { [weak self] corner in self?.hud.setCorner(corner) }
+        a.resetPosition = { [weak self] in self?.hud.resetPosition() }
+        a.resetMenuPosition = { [weak self] in self?.resetPosition() }
+        a.finishMenuDrag = { [weak self] in self?.finishDrag() }
         a.openLog = { [weak self] in
-            self?.closePopover()
+            self?.close()
             let url = AgentHUDPaths.decisionsLog
             if !FileManager.default.fileExists(atPath: url.path) {
                 try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -141,5 +233,30 @@ final class StatusMenu: NSObject, NSPopoverDelegate {
         }
         a.quit = { NSApp.terminate(nil) }
         return a
+    }
+}
+
+private final class MenuWindow: NSPanel {
+    var dismiss: () -> Void = {}
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+    override func cancelOperation(_ sender: Any?) { dismiss() }
+}
+
+private struct MenuWindowContent: View {
+    var panel: ControlPanelView
+    var onSize: (CGFloat) -> Void
+
+    var body: some View {
+        ScrollView {
+            panel
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { ceil($0.size.height) } action: { height in
+                    Task { @MainActor in onSize(height) }
+                }
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .background(Brand.bg)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }

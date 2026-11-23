@@ -19,7 +19,9 @@ final class HUDController: NSObject, NSWindowDelegate {
     let panel: HUDPanel
     private let model: AppModel
     private var size = CGSize(width: 80, height: 60)
-    private var settingFrame = false
+    private var lastPlacedFrame: CGRect?
+    private var movingWindow = false
+    private var applyingPlacement = false
     private var cancellables = Set<AnyCancellable>()
 
     init(model: AppModel) {
@@ -46,6 +48,13 @@ final class HUDController: NSObject, NSWindowDelegate {
         let host = FirstClickHostingView(rootView: root)
         host.sizingOptions = []
         panel.contentView = host
+        migrateLegacyAnchor()
+
+        Publishers.CombineLatest(model.settings.$hudDisplay, model.settings.$hudCorner)
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.placeWindow() }
+            .store(in: &cancellables)
 
         model.objectWillChange
             .receive(on: RunLoop.main)
@@ -59,10 +68,13 @@ final class HUDController: NSObject, NSWindowDelegate {
                 if key != nil, self.model.selectedByUser { self.panel.makeKey() }
             }
             .store(in: &cancellables)
-        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
-                                               object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.placeWindow() }
-        }
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.migrateLegacyAnchor()
+                self?.placeWindow()
+            }
+            .store(in: &cancellables)
     }
 
     var isShown: Bool { panel.isVisible }
@@ -79,9 +91,15 @@ final class HUDController: NSObject, NSWindowDelegate {
         }
     }
 
-    func resetPosition() {
-        model.settings.anchor = nil
+    func setCorner(_ corner: HUDCorner) {
+        model.settings.clearHUDOffsets()
+        model.settings.clearLegacyHUDAnchor()
+        model.settings.hudCorner = corner
         placeWindow()
+    }
+
+    func resetPosition() {
+        setCorner(.topRight)
     }
 
     private func contentSizeChanged(_ s: CGSize) {
@@ -90,26 +108,55 @@ final class HUDController: NSObject, NSWindowDelegate {
         placeWindow()
     }
 
-    /// Правый верхний угол панели держим в одной точке, размер меняется влево и вниз.
-    private func placeWindow() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
-        let vf = screen.visibleFrame
-        var anchor = model.settings.anchor ?? CGPoint(x: vf.maxX - 2, y: vf.maxY + 2)
-        // Не даём уехать за экран (например, после отключения монитора).
-        if !NSScreen.screens.contains(where: { $0.frame.insetBy(dx: -4, dy: -4).contains(anchor) }) {
-            anchor = CGPoint(x: vf.maxX - 2, y: vf.maxY + 2)
-        }
-        let frame = NSRect(x: anchor.x - size.width, y: anchor.y - size.height, width: size.width, height: size.height)
-        settingFrame = true
-        panel.setFrame(frame, display: true)
-        settingFrame = false
+    private func migrateLegacyAnchor() {
+        let settings = model.settings
+        guard settings.hudDisplay.isEmpty, let anchor = settings.legacyHUDAnchor,
+              let screen = NSScreen.screens.first(where: { $0.frame.insetBy(dx: -4, dy: -4).contains(anchor) })
+        else { return }
+        let bounds = screen.visibleFrame
+        settings.setHUDOffset(CGPoint(x: bounds.maxX - anchor.x, y: bounds.maxY - anchor.y), on: screen.placementID)
+        settings.hudDisplay = screen.placementID
+        settings.clearLegacyHUDAnchor()
     }
 
-    nonisolated func windowDidMove(_ notification: Notification) {
-        Task { @MainActor in
-            guard !self.settingFrame else { return }
-            let f = self.panel.frame
-            self.model.settings.anchor = CGPoint(x: f.maxX, y: f.maxY)
+    private func placeWindow() {
+        guard !movingWindow else { return }
+        let settings = model.settings
+        let screens = NSScreen.screens
+        guard let screen = screens.first(where: { $0.placementID == settings.hudDisplay }) ?? screens.first else { return }
+        let offset = settings.hudOffset(on: screen.placementID) ?? CGPoint(x: 2, y: 0)
+        let frame = settings.hudCorner.frame(size: size, in: screen.visibleFrame, offset: offset)
+        applyingPlacement = true
+        if panel.frame != frame { panel.setFrame(frame, display: true) }
+        applyingPlacement = false
+        lastPlacedFrame = panel.frame
+    }
+
+    func windowWillMove(_ notification: Notification) {
+        guard !applyingPlacement, !movingWindow, (NSEvent.pressedMouseButtons & 1) != 0 else { return }
+        movingWindow = true
+        // AppKit can consume the mouse-up in a system window drag.
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                guard (NSEvent.pressedMouseButtons & 1) == 0 else { return }
+                timer.invalidate()
+                self.movingWindow = false
+                self.saveDraggedPosition()
+                self.placeWindow()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func saveDraggedPosition() {
+        guard panel.frame != lastPlacedFrame, let screen = panel.screen else { return }
+        let settings = model.settings
+        settings.clearLegacyHUDAnchor()
+        settings.setHUDOffset(settings.hudCorner.offset(of: panel.frame, in: screen.visibleFrame), on: screen.placementID)
+        let movesToOtherScreen = screen.placementID != NSScreen.screens.first?.placementID
+        if (!settings.hudDisplay.isEmpty || movesToOtherScreen), settings.hudDisplay != screen.placementID {
+            settings.hudDisplay = screen.placementID
         }
     }
 }

@@ -135,6 +135,10 @@ if let i = CommandLine.arguments.firstIndex(of: "--selftest"), i + 1 < CommandLi
     exit(code)
 }
 
+if CommandLine.arguments.contains("--placement-test") {
+    exit(PlacementTest.run())
+}
+
 if CommandLine.arguments.contains("--uitest") {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)

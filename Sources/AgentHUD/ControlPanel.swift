@@ -1,7 +1,8 @@
 import AgentHUDCore
+import AppKit
 import SwiftUI
 
-/// Действия панели — их выполняет StatusMenu (закрывает поповер, показывает диалоги).
+/// Действия панели — их выполняет StatusMenu.
 struct PanelActions {
     var openSession: (String) -> Void = { _ in }
     var focusSession: (String) -> Void = { _ in }
@@ -9,7 +10,11 @@ struct PanelActions {
     var disconnect: (AgentKind) -> Void = { _ in }
     var setTimeout: (Int) -> Void = { _ in }
     var setLoginItem: (Bool) -> Void = { _ in }
+    var setHUDDisplay: (String) -> Void = { _ in }
+    var setHUDCorner: (HUDCorner) -> Void = { _ in }
     var resetPosition: () -> Void = {}
+    var resetMenuPosition: () -> Void = {}
+    var finishMenuDrag: (() -> Void)?
     var openLog: () -> Void = {}
     var quit: () -> Void = {}
 }
@@ -23,6 +28,17 @@ struct ControlPanelView: View {
     var installed: [AgentKind: Bool] = [:]
     var loginItem = false
     @State var tab = 0
+    @State private var displays = NSScreen.screens
+
+    init(model: AppModel, settings: Settings, actions: PanelActions = PanelActions(),
+         installed: [AgentKind: Bool] = [:], loginItem: Bool = false, tab: Int = 0) {
+        self.model = model
+        self.settings = settings
+        self.actions = actions
+        self.installed = installed
+        self.loginItem = loginItem
+        _tab = State(initialValue: tab)
+    }
 
     static let width: CGFloat = 340
 
@@ -36,6 +52,7 @@ struct ControlPanelView: View {
                 agentsSection
             } else {
                 lookSection
+                placementSection
                 behaviorSection
             }
             footer
@@ -43,6 +60,9 @@ struct ControlPanelView: View {
         .padding(16)
         .frame(width: Self.width)
         .background(Brand.bg)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+            displays = NSScreen.screens
+        }
     }
 
     // MARK: Шапка
@@ -64,6 +84,14 @@ struct ControlPanelView: View {
                     .foregroundStyle(waiting > 0 ? Brand.warning : Brand.inkSubtle)
             }
             Spacer()
+            if let finishDrag = actions.finishMenuDrag {
+                Image(systemName: "line.3.horizontal")
+                    .foregroundStyle(Brand.inkSubtle)
+                    .frame(width: 30, height: 30)
+                    .overlay { MenuDragHandle(finishDrag: finishDrag) }
+                    .help("Перетащить окно")
+                    .accessibilityLabel("Перетащить окно")
+            }
         }
     }
 
@@ -152,11 +180,41 @@ struct ControlPanelView: View {
         }
     }
 
+    private var placementSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionLabel(index: 2, title: "Расположение")
+            Card {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("Экран HUD", selection: Binding(get: { settings.hudDisplay }, set: actions.setHUDDisplay)) {
+                        Text("Основной").tag("")
+                        ForEach(displays, id: \.placementID) { screen in
+                            Text(displayTitle(screen)).tag(screen.placementID)
+                        }
+                        if !settings.hudDisplay.isEmpty, !displays.contains(where: { $0.placementID == settings.hudDisplay }) {
+                            Text("Отключённый экран").tag(settings.hudDisplay)
+                        }
+                    }
+                    Picker("Положение HUD", selection: Binding(get: { settings.hudCorner }, set: actions.setHUDCorner)) {
+                        ForEach(HUDCorner.allCases) { corner in Text(corner.title).tag(corner) }
+                    }
+                    Button("Вернуть окно под значок", action: actions.resetMenuPosition)
+                }
+                .padding(.vertical, 10)
+            }
+        }
+    }
+
+    private func displayTitle(_ screen: NSScreen) -> String {
+        guard displays.filter({ $0.localizedName == screen.localizedName }).count > 1,
+              let index = displays.firstIndex(of: screen) else { return screen.localizedName }
+        return "\(screen.localizedName) (\(index + 1))"
+    }
+
     // MARK: 04 Поведение
 
     private var behaviorSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(index: 2, title: "Поведение")
+            SectionLabel(index: 3, title: "Поведение")
             Card {
                 VStack(alignment: .leading, spacing: 4) {
                     BrandToggleRow(title: "Открывать окошко при запросе", isOn: $settings.openCardOnRequest)
@@ -187,6 +245,43 @@ struct ControlPanelView: View {
             GhostButton(title: "Выйти", symbol: "power", action: actions.quit)
         }
         .padding(.horizontal, -10)
+    }
+}
+
+/// The mouse stays in screen coordinates while the window moves underneath the drag handle.
+private struct MenuDragHandle: NSViewRepresentable {
+    let finishDrag: () -> Void
+
+    func makeNSView(context: Context) -> DragView { DragView() }
+    func updateNSView(_ view: DragView, context: Context) { view.finishDrag = finishDrag }
+
+    final class DragView: NSView {
+        var finishDrag: () -> Void = {}
+        private var startMouse = CGPoint.zero
+        private var startOrigin = CGPoint.zero
+        private var didDrag = false
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
+
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            startMouse = NSEvent.mouseLocation
+            startOrigin = window.frame.origin
+            didDrag = false
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            let mouse = NSEvent.mouseLocation
+            didDrag = true
+            window?.setFrameOrigin(CGPoint(x: startOrigin.x + mouse.x - startMouse.x,
+                                           y: startOrigin.y + mouse.y - startMouse.y))
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            if didDrag { finishDrag() }
+            didDrag = false
+        }
     }
 }
 

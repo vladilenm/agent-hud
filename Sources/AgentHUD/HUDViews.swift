@@ -42,13 +42,15 @@ struct HUDRootView: View {
     var onSize: (CGSize) -> Void = { _ in }
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            AvatarRow(model: model)
+        let corner = model.settings.hudCorner
+        VStack(alignment: corner.isLeft ? .leading : .trailing, spacing: 8) {
+            if !corner.isBottom { AvatarRow(model: model) }
             if let key = model.selectedKey, let s = model.store.session(key) {
                 SessionCard(model: model, session: s)
-                    .transition(.asymmetric(insertion: .scale(scale: 0.96, anchor: .topTrailing).combined(with: .opacity),
+                    .transition(.asymmetric(insertion: .scale(scale: 0.96, anchor: cardAnchor(corner)).combined(with: .opacity),
                                             removal: .opacity))
             }
+            if corner.isBottom { AvatarRow(model: model) }
         }
         .padding(14)   // место под тень
         .fixedSize()
@@ -56,6 +58,10 @@ struct HUDRootView: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: model.visibleSessions.map(\.id))
         .onGeometryChange(for: CGSize.self) { $0.size } action: { onSize($0) }
     }
+    private func cardAnchor(_ corner: HUDCorner) -> UnitPoint {
+        UnitPoint(x: corner.isLeft ? 0 : 1, y: corner.isBottom ? 1 : 0)
+    }
+
 }
 
 // MARK: - Ряд персонажей
